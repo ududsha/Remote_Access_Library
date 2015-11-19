@@ -1,39 +1,51 @@
 #pragma once
 #include <memory>
-#include "CommonNetwork.h"
 #include "BufferManager.h"
+#include <vector>
+#include "Commands.h"
 
 namespace SL {
 	namespace Remote_Access_Library {
-		namespace Utilities {
-			struct Blk;
-		}
 		namespace Network {
-			extern Utilities::BufferManager PacketBufferManager;
+			#define HEADERSIZE sizeof(PacketHeader)
+
+			struct PacketHeader {
+				unsigned int PayloadLen = 0;
+				unsigned int UnCompressedlen = 0;
+				Commands::PACKET_TYPES Packet_Type = Commands::PACKET_TYPES::INVALID;
+			};
+
+			struct Packet_Impl;
 			class Packet {
-				Packet(const Packet&) = delete;
-				Packet& operator=(const Packet&) = delete;
 
 			public:
-				//only move allowed, no copy
-				Packet(Packet&& pac);
-				Packet& operator=(const Packet&& pac);
-				Packet(std::shared_ptr<Utilities::Blk>& blk);
+				//Use this to generate new Packets!
+				static std::shared_ptr<Packet> CreatePacket(PacketHeader header); 
+				template<class T> static std::shared_ptr<Packet> CreatePacket(PacketHeader header, T& commandheader, char* data, size_t len);
+				Packet(Packet_Impl&);
 				~Packet();
-				//this will construct a packet of packetsize bytes
-				static std::shared_ptr<Packet> CreatePacket(PACKET_TYPES ptype, size_t packetsize);
+				//pointer to the beginning of the packet payload
+				char* data() const { return _Data.data; }
+				PacketHeader* header() { return &_PacketHeader; }
 
-				
-				//gets a pointer to the beginning of the allocated payload
-				char* get_Payload();
-				//gets the size of the users payload, NOT including the library headers which are added onto a packet
-				size_t get_Payloadsize();
-				//get the type of the packet
-				PACKET_TYPES get_Packettype();
-				std::shared_ptr<Utilities::Blk> get_Blk() const { return _Data; }
+				//compresses the packet, so make sure not to write data after this, otherwise you could corrupt the data.  tempbuffer is for performance: ompressing packets requires another buffer to copy data to, so this allows a prevous buffer to be reused. If you dont pass a buffer, one will be created and used for each call to compress
+				void compress();
+				//this decompresses the packet, tempbuffer is for performance: decompressing packets requires another buffer to copy data to, so this allows a prevous buffer to be reused. If you dont pass a buffer, one will be created and used for each call to decompress
+				void decompress();
+
 			private:
-				std::shared_ptr<Utilities::Blk> _Data;
+				PacketHeader _PacketHeader;
+				Utilities::Blk _Data;
+
 			};
+			template<class T>
+			inline std::shared_ptr<Packet> Packet::CreatePacket(PacketHeader header, T & commandheader, char * data, size_t len)
+			{
+				auto pack = Packet::CreatePacket(header);
+				memcpy(pack->data(), &commandheader, sizeof(T));
+				memcpy(pack->data() + sizeof(T), data, len);
+				return pack;
+			}
 		}
 	}
 }

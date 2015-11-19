@@ -1,46 +1,46 @@
-#include <vector>
-#include <mutex>
-#include <algorithm>
+#include "stdafx.h"
 #include "Packet.h"
-#include "BufferManager.h"
+#include "zstd.h"
+#include "Internal_Impls.h"
 
-SL::Remote_Access_Library::Utilities::BufferManager PacketBufferManager;
-
-#define HEADERSIZE sizeof(PacketHeader)
-
-std::shared_ptr<SL::Remote_Access_Library::Network::Packet> SL::Remote_Access_Library::Network::Packet::CreatePacket(PACKET_TYPES ptype, size_t packetsize) {
-	return std::make_shared<Packet>(PacketBufferManager.AquireBuffer(packetsize + HEADERSIZE));
+struct SL::Remote_Access_Library::Network::Packet_Impl {
+	PacketHeader h;
+};
+std::shared_ptr<SL::Remote_Access_Library::Network::Packet> SL::Remote_Access_Library::Network::Packet::CreatePacket(PacketHeader header) {
+	Packet_Impl p;
+	p.h = header;
+	return std::make_shared<SL::Remote_Access_Library::Network::Packet>(p);
 }
-
-SL::Remote_Access_Library::Network::Packet::Packet(Packet&& pac) : _Data(std::move(pac._Data)) {}
-SL::Remote_Access_Library::Network::Packet& SL::Remote_Access_Library::Network::Packet::operator=(const Packet&& pac) {
-	_Data = std::move(pac._Data);
-	return *this;
+SL::Remote_Access_Library::Network::Packet::Packet(Packet_Impl& priv) {
+	_PacketHeader = priv.h;
+	_Data= Remote_Access_Library::INTERNAL::_PacketBuffer.AquireBuffer(ZSTD_compressBound(std::max(_PacketHeader.PayloadLen, _PacketHeader.UnCompressedlen)));
 }
-
-SL::Remote_Access_Library::Network::Packet::Packet(std::shared_ptr<Utilities::Blk>& blk): _Data(blk) {}
-
 SL::Remote_Access_Library::Network::Packet::~Packet()
 {
-	PacketBufferManager.ReleaseBuffer(_Data);
+	Remote_Access_Library::INTERNAL::_PacketBuffer.ReleaseBuffer(_Data);
 }
 
-
-char* SL::Remote_Access_Library::Network::Packet::get_Payload() {
-	if (!_Data) return nullptr;
-	return getData(_Data) + HEADERSIZE;
+void SL::Remote_Access_Library::Network::Packet::compress()
+{
+	if (_PacketHeader.UnCompressedlen > 0) return;//allready compressed
+	auto maxsize = ZSTD_compressBound(_PacketHeader.PayloadLen);
+	auto buf = Remote_Access_Library::INTERNAL::_PacketBuffer.AquireBuffer(maxsize);
+	
+	_PacketHeader.UnCompressedlen = _PacketHeader.PayloadLen;
+	_PacketHeader.PayloadLen = static_cast<unsigned int>(ZSTD_compress(buf.data, maxsize, data(), _PacketHeader.PayloadLen));
+	memcpy(data(), buf.data, _PacketHeader.PayloadLen);
+	Remote_Access_Library::INTERNAL::_PacketBuffer.ReleaseBuffer(buf);
 }
 
-size_t SL::Remote_Access_Library::Network::Packet::get_Payloadsize() {
-	if (!_Data) return 0;
-	auto ptr = (PacketHeader*)getData(_Data);
-	return ptr->PayloadLen;
+void SL::Remote_Access_Library::Network::Packet::decompress()
+{
+	if (_PacketHeader.UnCompressedlen <= 0) return;//allready decompressed
+
+	auto buf = Remote_Access_Library::INTERNAL::_PacketBuffer.AquireBuffer(_PacketHeader.UnCompressedlen);
+
+	auto dstsize = ZSTD_decompress(buf.data, _PacketHeader.UnCompressedlen, data(), _PacketHeader.PayloadLen);
+	memcpy(data(), buf.data, dstsize);
+	_PacketHeader.PayloadLen = static_cast<unsigned int>(dstsize);
+	_PacketHeader.UnCompressedlen = 0;
+	Remote_Access_Library::INTERNAL::_PacketBuffer.ReleaseBuffer(buf);
 }
-
-SL::Remote_Access_Library::Network::PACKET_TYPES SL::Remote_Access_Library::Network::Packet::get_Packettype() {
-	if (!_Data) return PACKET_TYPES::INVALID;
-	auto ptr = (PacketHeader*)getData(_Data);
-	return (PACKET_TYPES)ptr->Packet_Type;
-}
-
-

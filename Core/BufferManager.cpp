@@ -3,58 +3,64 @@
 #include <mutex>
 #include <algorithm>
 #include "BufferManager.h"
+#include <iostream>
 
-
-struct SL::Remote_Access_Library::Utilities::Blk {
-	size_t size = 0;
-	char* data = nullptr;
-};
 struct SL::Remote_Access_Library::Utilities::BufferManagerImpl {
 	size_t _Bytes_Allocated = 0;
 	size_t Max_Buffer_Size = 0;
-	std::vector<std::shared_ptr<Blk>> _Buffer;
+	size_t Total_OutStanding = 0;
+	std::vector<Blk> _Buffer;
 	std::mutex _BufferLock;
 };
-size_t SL::Remote_Access_Library::Utilities::getSize(const std::shared_ptr<SL::Remote_Access_Library::Utilities::Blk>& b)
-{
-	return b->size;
-}
-
-char* SL::Remote_Access_Library::Utilities::getData(const std::shared_ptr<SL::Remote_Access_Library::Utilities::Blk>& b)
-{
-	return b->data;
-}
 
 SL::Remote_Access_Library::Utilities::BufferManager::BufferManager(size_t max_buffersize)
 {
+	_BufferManagerImpl = new BufferManagerImpl();
 	_BufferManagerImpl->Max_Buffer_Size = max_buffersize;
 }
 
-std::shared_ptr<SL::Remote_Access_Library::Utilities::Blk> SL::Remote_Access_Library::Utilities::BufferManager::AquireBuffer(size_t req_bytes) {
+SL::Remote_Access_Library::Utilities::BufferManager::~BufferManager()
+{
+	delete _BufferManagerImpl;
+}
+
+SL::Remote_Access_Library::Utilities::Blk SL::Remote_Access_Library::Utilities::BufferManager::AquireBuffer(size_t req_bytes) {
+	if (req_bytes == 0) return Blk();
 	std::lock_guard<std::mutex> lock(_BufferManagerImpl->_BufferLock);
-	auto found = std::remove_if(begin(_BufferManagerImpl->_Buffer), end(_BufferManagerImpl->_Buffer), [=](std::shared_ptr<SL::Remote_Access_Library::Utilities::Blk>& c) {  return c->size >= req_bytes; });
+	_BufferManagerImpl->Total_OutStanding += req_bytes;
+	auto found = std::find_if(begin(_BufferManagerImpl->_Buffer), end(_BufferManagerImpl->_Buffer), [req_bytes](const SL::Remote_Access_Library::Utilities::Blk& c) {  return c.size >= req_bytes; });
 
 	if (found == _BufferManagerImpl->_Buffer.end()) {
-		auto b = new SL::Remote_Access_Library::Utilities::Blk;
-		b->data = new char[req_bytes];
-		b->size = req_bytes;
-		return std::shared_ptr<SL::Remote_Access_Library::Utilities::Blk>(b, [](SL::Remote_Access_Library::Utilities::Blk* b) { delete[] b->data; delete b; });
+		std::cout << "new " << std::endl;
+		SL::Remote_Access_Library::Utilities::Blk b;
+		b.data = new char[req_bytes];
+		b.size = req_bytes;
+		return b;
 	}
 	else {
+		std::cout << "used " << _BufferManagerImpl->_Bytes_Allocated << std::endl;
 		auto ret(*found);
-		_BufferManagerImpl->_Bytes_Allocated -= ret->size;
+		_BufferManagerImpl->_Bytes_Allocated -= ret.size;
 		_BufferManagerImpl->_Buffer.erase(found);
 		return ret;
 	}
 }
-void SL::Remote_Access_Library::Utilities::BufferManager::ReleaseBuffer(std::shared_ptr<SL::Remote_Access_Library::Utilities::Blk>& buffer) {
-	if (buffer == nullptr) return;
+void SL::Remote_Access_Library::Utilities::BufferManager::ReleaseBuffer(SL::Remote_Access_Library::Utilities::Blk& buffer) {
+	if (buffer.data == nullptr || buffer.size == 0) {
+		std::cout << "empty " << std::endl;
+		return;
+	}
+	_BufferManagerImpl->Total_OutStanding -= buffer.size;
 	if (_BufferManagerImpl->_Bytes_Allocated < _BufferManagerImpl->Max_Buffer_Size) {//ignore the fact that this will mean our buffer holds more than our maxsize
+		std::cout << "addingtobuffer " << _BufferManagerImpl->_Bytes_Allocated<<std::endl;
 		std::lock_guard<std::mutex> lock(_BufferManagerImpl->_BufferLock);
-		auto found = std::find(begin(_BufferManagerImpl->_Buffer), end(_BufferManagerImpl->_Buffer), buffer);
-		if (found == _BufferManagerImpl->_Buffer.end()) {
-			_BufferManagerImpl->_Bytes_Allocated += buffer->size;
-			_BufferManagerImpl->_Buffer.emplace_back(buffer);
-		}
-	}//otherwise ignore and let it be reclaimed
+		_BufferManagerImpl->_Bytes_Allocated += buffer.size;
+		_BufferManagerImpl->_Buffer.push_back(buffer);
+	}
+	else {
+		std::cout << "deleting " << std::endl;
+		delete[] buffer.data;//free the buffer!
+		buffer.data = nullptr;
+		buffer.size = 0;
+	}
 }
